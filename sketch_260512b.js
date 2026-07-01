@@ -114,6 +114,16 @@ let umbralDuracionSonido = 1000;
 let mic;
 let audioIniciado = false;
 
+// -------------EASTER EGG AUDIO PC-----------------
+let modoAudioPC = false;
+let streamSistema = null;
+let amplitudeSistema = null;
+let pitchSistema = null;
+let hayPitchSistema = false;
+let notaMidiSistema = 0;
+let sourceSistema = null;
+let hayVozPC = false;
+
 // -------------AMPLITUD-----------------
 let pisoAmp = Infinity;
 let techoAmp = -Infinity;
@@ -248,9 +258,14 @@ function draw() {
         return;
     }
 
-    // Si el audio está iniciado, se procesa el stream del micrófono
+    // Si el audio está iniciado, se procesa el stream del micrófono o de la PC
     if (audioIniciado) {
-        amp = mic.getLevel();
+        if (modoAudioPC && amplitudeSistema) {
+            amp = amplitudeSistema.getLevel();
+            hayPitch = hayPitchSistema;
+        } else {
+            amp = mic.getLevel();
+        }
 
         if (calibrandoAmp) {
             // Captura los valores máximos y mínimos de volumen
@@ -371,6 +386,43 @@ function draw() {
     push();
     translate(width * 0.15, height * 0.05);
     scale(0.85);
+
+    // === CÁLCULO DINÁMICO DE LA SOMBRA CON EL SONIDO ===
+    let desviacionAngulo = 0;
+    let distSombra = 15;
+    if (audioIniciado && haySonido) {
+        desviacionAngulo = map(altura, 0.0, 1.0, -0.32, 0.32);
+        distSombra = map(intensidad, 0.0, 1.0, 15, 25);
+    }
+    let anguloSombra = PI / 4 + desviacionAngulo;
+    let shadowOffsetX = distSombra * cos(anguloSombra);
+    let shadowOffsetY = distSombra * sin(anguloSombra);
+
+    // === DIBUJO DE LA SOMBRA EN CAÍDA (SUTIL) ===
+    push();
+    drawingContext.shadowColor = 'rgba(0, 0, 0, 0.25)'; // Sombra difusa mate un poco más marcada
+    drawingContext.shadowBlur = 20; // Difuminado ajustado para mayor presencia
+    drawingContext.shadowOffsetX = shadowOffsetX;
+    drawingContext.shadowOffsetY = shadowOffsetY;
+
+    fill(colFondo); // Silueta invisible (del mismo color de fondo)
+    noStroke();
+
+    // Dibujamos las mismas formas base para proyectar la sombra del conjunto completo
+    rect(60, 420, 450, 310);  // Base verde (Bloque 6)
+    rect(450, 275, 300, 330); // Bloque rosa a la derecha (Bloque 5)
+    rect(45, 50, 260, 260);   // Bloque amarillo (Bloque 1)
+    rect(305, 0, 355, 320);   // Bloque rojo (Bloque 2)
+    rect(115, 310, 345, 415); // Bloque morado (Bloque 3)
+    rect(460, 310, 255, 250); // Bloque azul (Bloque 4)
+    rect(0, 725, 575, 75);    // Barra inferior (Bloque 7)
+    pop();
+
+    // === RESTABLECER PROPIEDADES DE SOMBRA PARA LA OBRA REAL ===
+    drawingContext.shadowColor = 'transparent';
+    drawingContext.shadowBlur = 0;
+    drawingContext.shadowOffsetX = 0;
+    drawingContext.shadowOffsetY = 0;
 
     // 1. Rectángulos de fondo (Verde y Rosa)
     fill(paletaActual.colBloque6);
@@ -548,13 +600,13 @@ function mousePressed() {
         for (let boton of botonesControlSonido) {
             if (mouseX >= boton.x && mouseX <= boton.x + boton.w &&
                 mouseY >= boton.y && mouseY <= boton.y + boton.h) {
-                
+
                 // Si es el botón de volver a la obra, no iniciamos el audio
                 if (boton.etiqueta === "← VOLVER A LA OBRA") {
                     boton.accion();
                     return;
                 }
-                
+
                 // Si es otro botón de acción, sí iniciamos el audio si no estaba activo
                 if (!audioIniciado) {
                     iniciarAudio();
@@ -568,7 +620,7 @@ function mousePressed() {
         for (let slider of slidersControlSonido) {
             if (mouseX >= slider.x && mouseX <= slider.x + slider.w &&
                 mouseY >= slider.y - 5 && mouseY <= slider.y + slider.h + 5) {
-                
+
                 // Si el audio no está iniciado, lo iniciamos ya que va a cambiar un parámetro acústico
                 if (!audioIniciado) {
                     iniciarAudio();
@@ -578,7 +630,7 @@ function mousePressed() {
                 return;
             }
         }
-        
+
         // Si el clic ocurre en zonas vacías del panel, lo ignoramos para no forzar audio
         return;
     }
@@ -682,6 +734,8 @@ function keyPressed() {
     if (key === '3' || key === '4') {
         // La mezcla manual por teclas se deshabilita para priorizar la interacción por sonido
         // mezclarPaletaAleatoriamente();
+    } else if (key === 'v' || key === 'V') {
+        toggleAudioPC();
     } else if (key === ' ') {
         // Volver al tamaño original y restaurar la paleta inicial original
         variacionVentana = 0;
@@ -1063,19 +1117,19 @@ function dibujarInterfazControlSonido() {
         strokeWeight(slider.h);
         stroke(225, 225, 230);
         strokeCap(ROUND);
-        line(slider.x, slider.y + slider.h/2, slider.x + slider.w, slider.y + slider.h/2);
+        line(slider.x, slider.y + slider.h / 2, slider.x + slider.w, slider.y + slider.h / 2);
 
         // Barra de progreso llena (color dinámico tomado de la paleta actual de la obra)
         let pct = map(valActual, slider.minVal, slider.maxVal, 0.0, 1.0, true);
         let colSlider = paletaActual[slider.claveColor] || '#e6b111';
         stroke(colSlider);
-        line(slider.x, slider.y + slider.h/2, slider.x + slider.w * pct, slider.y + slider.h/2);
+        line(slider.x, slider.y + slider.h / 2, slider.x + slider.w * pct, slider.y + slider.h / 2);
 
         // Perilla (knob) minimalista
         stroke(170, 170, 175);
         strokeWeight(1);
         fill(255);
-        ellipse(slider.x + slider.w * pct, slider.y + slider.h/2, 14, 14);
+        ellipse(slider.x + slider.w * pct, slider.y + slider.h / 2, 14, 14);
     }
 
     // Dibujar botones
@@ -1114,7 +1168,7 @@ function dibujarInterfazControlSonido() {
 
     // --- PANEL DERECHO: TELEMETRÍA Y OSCILOSCOPIOS ---
     let dx = 480;
-    
+
     // Dibujar osciloscopio de amplitud
     fill(90, 90, 95);
     textSize(11);
@@ -1141,7 +1195,7 @@ function dibujarInterfazControlSonido() {
     textSize(12);
     textStyle(NORMAL);
     fill(100, 100, 105);
-    
+
     // Categoría: Amplitud
     text("VOLUMEN / INTENSIDAD:", dx + 20, 455);
     fill(40, 40, 45);
@@ -1210,7 +1264,7 @@ function actualizarValorSliderControlSonido() {
     if (sliderActivoControlSonido.esEntero) {
         nuevoVal = Math.round(nuevoVal);
     }
-    
+
     sliderActivoControlSonido.set(nuevoVal);
 }
 
@@ -1286,5 +1340,144 @@ function getPitch() {
         }
 
         getPitch();
+    });
+}
+
+/**
+ * Alterna el modo de Audio de PC (Easter Egg).
+ * Utiliza getDisplayMedia para capturar el sonido del sistema en tiempo real.
+ */
+async function toggleAudioPC() {
+    if (!audioIniciado) {
+        await iniciarAudio();
+    }
+
+    if (modoAudioPC) {
+        // Desactivar modo Audio PC
+        modoAudioPC = false;
+
+        // Detener streams de sistema si existen
+        if (streamSistema) {
+            streamSistema.getTracks().forEach(track => track.stop());
+            streamSistema = null;
+        }
+
+        amplitudeSistema = null;
+        pitchSistema = null;
+        sourceSistema = null;
+        hayVozPC = false;
+
+        // Volver a conectar la FFT y activar el micrófono
+        fft.setInput(mic);
+        mic.start(
+            () => {
+                console.log("Micrófono reactivado tras salir de Modo Audio PC.");
+            },
+            (err) => {
+                console.error("Error al reactivar micrófono:", err);
+            }
+        );
+
+        console.log("Modo Audio PC DESACTIVADO. Retornando a micrófono normal.");
+    } else {
+        // Activar modo Audio PC
+        try {
+            let stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: true
+            });
+
+            // Detener la pista de video inmediatamente para ahorrar recursos
+            stream.getVideoTracks().forEach(track => track.stop());
+
+            let audioTracks = stream.getAudioTracks();
+            if (audioTracks.length === 0) {
+                console.warn("No se seleccionó audio del sistema. Cancelando.");
+                stream.getTracks().forEach(track => track.stop());
+                return;
+            }
+
+            // Pausar micrófono normal para que no capte ruido de fondo
+            mic.stop();
+
+            streamSistema = stream;
+
+            // Detectar si el usuario pulsa "Dejar de compartir" en el banner nativo del navegador
+            audioTracks[0].onended = () => {
+                if (modoAudioPC) {
+                    toggleAudioPC();
+                }
+            };
+
+            let systemAudioStream = new MediaStream([audioTracks[0]]);
+
+            let context = getAudioContext();
+            sourceSistema = context.createMediaStreamSource(systemAudioStream);
+
+            amplitudeSistema = new p5.Amplitude();
+            amplitudeSistema.setInput(sourceSistema);
+
+            fft.setInput(sourceSistema);
+
+            pitchSistema = ml5.pitchDetection(
+                model_url,
+                context,
+                systemAudioStream,
+                () => {
+                    console.log("Modelo de pitch cargado para audio de la PC.");
+                    getPitchPC();
+                }
+            );
+
+            modoAudioPC = true;
+            console.log("Modo Audio PC ACTIVO.");
+        } catch (err) {
+            console.error("Error al capturar audio de la PC:", err);
+            // Si el usuario cancela, volvemos a encender el micrófono
+            mic.start();
+        }
+    }
+}
+
+/**
+ * Realiza la lectura recursiva de pitch-detection para el audio del sistema (PC).
+ * Prioriza la voz humana (Crepe) y, si no se detecta voz, recurre al centroide instrumental (FFT).
+ */
+function getPitchPC() {
+    if (!modoAudioPC || !pitchSistema) return;
+
+    pitchSistema.getPitch(function (err, frequency) {
+        if (err) {
+            console.error("Error en getPitchPC:", err);
+            if (modoAudioPC) {
+                setTimeout(getPitchPC, 120);
+            }
+            return;
+        }
+
+        if (frequency) {
+            // Prioridad 1: Detección de voz humana (tono fundamental claro detectado por Crepe)
+            notaMidiSistema = freqToMidi(frequency);
+            hayPitchSistema = true;
+            hayVozPC = true;
+            marcaUltimoPitch = millis();
+            gestorFrec.actualizar(notaMidiSistema);
+        } else {
+            // Prioridad 2: No hay voz humana limpia. Usamos el centroide de la FFT para capturar los instrumentos
+            hayVozPC = false;
+            let frecInstrumental = fft.getCentroid();
+            if (frecInstrumental > 0) {
+                notaMidiSistema = freqToMidi(frecInstrumental);
+                hayPitchSistema = true;
+                marcaUltimoPitch = millis();
+                gestorFrec.actualizar(notaMidiSistema);
+            } else {
+                hayPitchSistema = millis() - marcaUltimoPitch <= timeoutSinPitch;
+            }
+        }
+
+        if (modoAudioPC) {
+            getPitchPC();
+        }
     });
 }
