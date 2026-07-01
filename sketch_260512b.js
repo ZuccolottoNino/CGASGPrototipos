@@ -90,6 +90,7 @@ let variacionVentana = 0; // Se mantiene por compatibilidad general
 let variacionV1 = 0;      // Deformación de Ventana 1 (Celeste)
 let variacionV2 = 0;      // Deformación de Ventana 2 (Naranja)
 let variacionV3 = 0;      // Deformación de Ventana 3 (Rosa)
+let variacionV4 = 0;      // Deformación de Ventana 4 (Extra - Aplausos)
 const LIMITE_EXPANSION = 30;
 const LIMITE_CONTRACCION = -40;
 
@@ -150,6 +151,13 @@ let haySonido = false;
 let antesHabiaSonido = false;
 let empezoElSonido = false;
 let terminoElSonido = false;
+
+// -------INTERACCION POR APLAUSOS-------
+let mostrarVentanaExtra = false;
+let ultimoAplauso = 0;
+let posibleAplauso = false;
+let tiempoPosibleAplauso = 0;
+let ampAnterior = 0;
 
 // -------TEMPORIZADORES----
 let marcaInicioSonido = 0;
@@ -269,6 +277,34 @@ function draw() {
             amp = mic.getLevel();
         }
 
+        // --- DETECCION DE APLAUSO RAPIDO Y CORTO (SEÑAL CRUDA) ---
+        let difAmp = amp - ampAnterior;
+        let tiempoActual = millis();
+
+        // Si la señal cruda sube bruscamente (ataque rápido) por encima del umbral de pico
+        if (amp > 0.22 && difAmp > 0.12 && !posibleAplauso && (tiempoActual - ultimoAplauso > 400)) {
+            posibleAplauso = true;
+            tiempoPosibleAplauso = tiempoActual;
+        }
+
+        if (posibleAplauso) {
+            let duracionPico = tiempoActual - tiempoPosibleAplauso;
+            
+            // Si el pico dura más de 150ms, se descarta (grito, siseo largo o silbido)
+            if (duracionPico > 150) {
+                posibleAplauso = false;
+            } 
+            // Si decae rápido por debajo de un nivel muy bajo de silencio en menos de 150ms, confirmamos aplauso
+            else if (amp < 0.05 && duracionPico > 25) {
+                mostrarVentanaExtra = !mostrarVentanaExtra;
+                ultimoAplauso = tiempoActual;
+                posibleAplauso = false;
+                console.log("Aplauso detectado con éxito! Ventana extra =", mostrarVentanaExtra ? "VISIBLE" : "OCULTA", "Duración transitorio =", duracionPico);
+            }
+        }
+
+        ampAnterior = amp;
+
         if (calibrandoAmp) {
             // Captura los valores máximos y mínimos de volumen
             pisoAmp = min(pisoAmp, amp);
@@ -316,10 +352,15 @@ function draw() {
         let targetV3 = map(intensidadV3, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
         variacionV3 = lerp(variacionV3, targetV3, 0.03);
 
+        // Ventana 4 (Extra): Deformación estándar con respuesta intermedia
+        let targetV4 = map(intensidad, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV4 = lerp(variacionV4, targetV4, 0.08);
+
         // Garantizar que ninguna ventana supere los límites físicos establecidos
         variacionV1 = constrain(variacionV1, LIMITE_CONTRACCION, LIMITE_EXPANSION);
         variacionV2 = constrain(variacionV2, LIMITE_CONTRACCION, LIMITE_EXPANSION);
         variacionV3 = constrain(variacionV3, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV4 = constrain(variacionV4, LIMITE_CONTRACCION, LIMITE_EXPANSION);
 
         // Clasificación de sonido mediante umbrales
         haySonido = intensidad > umbralRuido;
@@ -489,6 +530,29 @@ function draw() {
     fill(paletaActual.colBloque2);
     rect(305, 0, 355, 320);
     image(grainBloque2, 305, 0);
+
+    // Ventana Extra condicional (Gatillada por aplausos)
+    if (mostrarVentanaExtra) {
+        let v4X = 392 - variacionV4;
+        let v4Y = 60 - variacionV4;
+        let v4W = 180 + 2 * variacionV4;
+        let v4H = 200 + 2 * variacionV4;
+
+        fill(paletaActual.colMarcoV3);
+        rect(v4X, v4Y, v4W, v4H);
+
+        fill(paletaActual.colInteriorV3);
+        rect(v4X + 8, v4Y + 8, v4W - 16, v4H - 16);
+
+        // Barrotes ventana 4 (Distribución proporcional con vibración siseante)
+        stroke(paletaActual.colMarcoV3);
+        strokeWeight(5);
+        let v4Desp1 = random(-ampVibracion, ampVibracion);
+        let v4Desp2 = random(-ampVibracion, ampVibracion);
+        line(v4X + v4W * 0.346 + v4Desp1, v4Y + 8, v4X + v4W * 0.346 + v4Desp1, v4Y + v4H - 8);
+        line(v4X + v4W * 0.64 + v4Desp2, v4Y + 8, v4X + v4W * 0.64 + v4Desp2, v4Y + v4H - 8);
+        noStroke();
+    }
 
     // 4. Bloque Morado (Centro abajo)
     fill(paletaActual.colBloque3);
@@ -769,6 +833,8 @@ function keyPressed() {
         variacionV1 = 0;
         variacionV2 = 0;
         variacionV3 = 0;
+        variacionV4 = 0;
+        mostrarVentanaExtra = false;
         zonaFrecuenciaAnterior = 0;
         paletaActual = { ...paletaInicial };
         paletaDestino = { ...paletaInicial };
