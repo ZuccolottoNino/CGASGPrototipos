@@ -84,8 +84,11 @@ let paletas = [
 // Colores de la obra (semánticos)
 let colFondo = '#f0f0f0';
 
-// Parámetro de interacción para las ventanas
-let variacionVentana = 0;
+// Parámetros de interacción para las ventanas
+let variacionVentana = 0; // Se mantiene por compatibilidad general
+let variacionV1 = 0;      // Deformación de Ventana 1 (Celeste)
+let variacionV2 = 0;      // Deformación de Ventana 2 (Naranja)
+let variacionV3 = 0;      // Deformación de Ventana 3 (Rosa)
 const LIMITE_EXPANSION = 30;
 const LIMITE_CONTRACCION = -40;
 
@@ -146,11 +149,12 @@ let sonidoLargo = false;
 let marcaUltimoPitch = 0;
 let timeoutSinPitch = 300;
 
-// -------DETECCION DE PICOS DE FRECUENCIA-----
+// -------DETECCION DE PICOS DE FRECUENCIA Y ZONAS-----
 let umbralVariacionFrec = 2.0; // Mínima variación en notas MIDI para filtrar el ruido ambiente
 let ultimoExtremoFrec = 0;     // Nota MIDI del último pico o valle
 let direccionFrec = 0;         // Dirección del cambio: 1 = subiendo, -1 = bajando, 0 = indefinido
 let ultimoCambioPaleta = 0;    // Registro de tiempo (millis) del último cambio de paleta
+let zonaFrecuenciaAnterior = 0; // Estado del frame anterior: 0=indefinido/silencio, 1=grave, 2=agudo
 
 // -------ANALISIS DE SISEO (SHHHHH) Y VIBRACION-----
 let fft;
@@ -280,6 +284,26 @@ function draw() {
         // Mapea la intensidad del sonido al rango permitido de variación de ventanas
         variacionVentana = map(intensidad, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
 
+        // Dinámicas y sensibilidades diferenciadas para cada ventana
+        // Ventana 1 (Celeste): Sensibilidad lineal estándar y suavizado lento
+        let targetV1 = map(intensidad, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV1 = lerp(variacionV1, targetV1, 0.07);
+
+        // Ventana 2 (Naranja): Reacción más rápida a bajos volúmenes (sensibilidad x1.4) y respuesta veloz
+        let intensidadV2 = constrain(intensidad * 1.4, 0.0, 1.0);
+        let targetV2 = map(intensidadV2, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV2 = lerp(variacionV2, targetV2, 0.3);
+
+        // Ventana 3 (Rosa): Reacción no lineal (sensibilidad baja a volumen moderado) y movimiento inercial muy lento
+        let intensidadV3 = pow(intensidad, 1.5);
+        let targetV3 = map(intensidadV3, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV3 = lerp(variacionV3, targetV3, 0.03);
+
+        // Garantizar que ninguna ventana supere los límites físicos establecidos
+        variacionV1 = constrain(variacionV1, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV2 = constrain(variacionV2, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV3 = constrain(variacionV3, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+
         // Clasificación de sonido mediante umbrales
         haySonido = intensidad > umbralRuido;
         empezoElSonido = haySonido && !antesHabiaSonido;
@@ -307,37 +331,35 @@ function draw() {
             durSilencio = millis() - marcaFinSonido;
         }
 
-        // Algoritmo de detección de picos en la variación de graves y agudos (con histéresis)
+        // Algoritmo de detección de transición de notas (Grave a Aguda con histéresis central)
         if (haySonido && hayPitch) {
             let notaActual = map(gestorFrec.filtrada, 0.0, 1.0, gestorFrec.minimo, gestorFrec.maximo);
+            let notaUmbralDivision = (gestorFrec.minimo + gestorFrec.maximo) / 2;
+            let margenHisteresis = 1.0; // Margen de exclusión en el centro del espectro para evitar oscilaciones rápidas
+            let zonaActual = 0;
 
-            if (direccionFrec === 0) {
-                ultimoExtremoFrec = notaActual;
-                direccionFrec = 1; // Asumimos dirección de subida al iniciar
-            } else if (direccionFrec === 1) {
-                // Buscando un pico máximo (agudo)
-                if (notaActual > ultimoExtremoFrec) {
-                    ultimoExtremoFrec = notaActual;
-                } else if (notaActual < ultimoExtremoFrec - umbralVariacionFrec) {
-                    // Se superó el umbral hacia abajo -> pico detectado
-                    mezclarPaletaAleatoriamente();
-                    direccionFrec = -1;
-                    ultimoExtremoFrec = notaActual;
-                }
-            } else if (direccionFrec === -1) {
-                // Buscando un valle mínimo (grave)
-                if (notaActual < ultimoExtremoFrec) {
-                    ultimoExtremoFrec = notaActual;
-                } else if (notaActual > ultimoExtremoFrec + umbralVariacionFrec) {
-                    // Se superó el umbral hacia arriba -> valle detectado
-                    mezclarPaletaAleatoriamente();
-                    direccionFrec = 1;
-                    ultimoExtremoFrec = notaActual;
-                }
+            if (notaActual < notaUmbralDivision - margenHisteresis) {
+                zonaActual = 1; // Zona Grave
+            } else if (notaActual > notaUmbralDivision + margenHisteresis) {
+                zonaActual = 2; // Zona Aguda
+            } else {
+                // Conserva el estado de zona anterior en la franja media para evitar ruidos de frontera
+                zonaActual = (zonaFrecuenciaAnterior !== 0) ? zonaFrecuenciaAnterior : 0;
+            }
+
+            // Si pasa de estar en zona Grave (1) a zona Aguda (2), se dispara la transición
+            if (zonaFrecuenciaAnterior === 1 && zonaActual === 2) {
+                mezclarPaletaAleatoriamente();
+                console.log("Transición acústica Grave -> Aguda detectada. Mezclando paleta.");
+            }
+
+            // Actualizamos el registro de estado
+            if (zonaActual !== 0) {
+                zonaFrecuenciaAnterior = zonaActual;
             }
         } else {
-            // Fuera de sonido o sin tono limpio, reseteamos la dirección para reiniciar
-            direccionFrec = 0;
+            // Fuera de sonido o sin tono limpio, restablecemos la zona de referencia
+            zonaFrecuenciaAnterior = 0;
         }
 
     }
@@ -363,10 +385,10 @@ function draw() {
     image(grainBloque1, 45, 50);
 
     // Ventana Celeste (Parametrizada)
-    let v1X = 100 - variacionVentana;
-    let v1Y = 95 - variacionVentana;
-    let v1W = 150 + 2 * variacionVentana;
-    let v1H = 165 + 2 * variacionVentana;
+    let v1X = 100 - variacionV1;
+    let v1Y = 95 - variacionV1;
+    let v1W = 150 + 2 * variacionV1;
+    let v1H = 165 + 2 * variacionV1;
 
     fill(paletaActual.colMarcoV1);
     rect(v1X, v1Y, v1W, v1H);
@@ -395,10 +417,10 @@ function draw() {
     image(grainBloque3, 115, 310);
 
     // Ventana Naranja (Parametrizada)
-    let v2X = 170 - variacionVentana;
-    let v2Y = 365 - variacionVentana;
-    let v2W = 230 + 2 * variacionVentana;
-    let v2H = 310 + 2 * variacionVentana;
+    let v2X = 170 - variacionV2;
+    let v2Y = 365 - variacionV2;
+    let v2W = 230 + 2 * variacionV2;
+    let v2H = 310 + 2 * variacionV2;
 
     fill(paletaActual.colMarcoV2);
     rect(v2X, v2Y, v2W, v2H);
@@ -424,10 +446,10 @@ function draw() {
     image(grainBloque4, 460, 310);
 
     // Ventana Rosa Fuerte (Parametrizada)
-    let v3X = 510 - variacionVentana;
-    let v3Y = 360 - variacionVentana;
-    let v3W = 150 + 2 * variacionVentana;
-    let v3H = 150 + 2 * variacionVentana;
+    let v3X = 510 - variacionV3;
+    let v3Y = 360 - variacionV3;
+    let v3W = 150 + 2 * variacionV3;
+    let v3H = 150 + 2 * variacionV3;
 
     fill(paletaActual.colMarcoV3);
     rect(v3X, v3Y, v3W, v3H);
@@ -663,6 +685,10 @@ function keyPressed() {
     } else if (key === ' ') {
         // Volver al tamaño original y restaurar la paleta inicial original
         variacionVentana = 0;
+        variacionV1 = 0;
+        variacionV2 = 0;
+        variacionV3 = 0;
+        zonaFrecuenciaAnterior = 0;
         paletaActual = { ...paletaInicial };
         redraw();
     }
@@ -948,6 +974,10 @@ function inicializarBotonesControlSonido() {
             accion: () => {
                 monitor = false;
                 variacionVentana = 0;
+                variacionV1 = 0;
+                variacionV2 = 0;
+                variacionV3 = 0;
+                zonaFrecuenciaAnterior = 0;
                 paletaActual = { ...paletaInicial };
                 // Apagar el retorno de voz automáticamente al volver a la obra
                 if (retornoVoz) {
@@ -1125,7 +1155,15 @@ function dibujarInterfazControlSonido() {
     fill(40, 40, 45);
     text("Frecuencia: " + frec.toFixed(1) + " Hz", dx + 40, 565);
     text("Nota MIDI: " + notaMidi.toFixed(1), dx + 40, 585);
-    text("Dirección Tono: " + (direccionFrec === 1 ? "SUBIENDO" : (direccionFrec === -1 ? "BAJANDO" : "REPOSO")), dx + 40, 605);
+    let zonaActualEtiqueta = "SILENCIO";
+    if (haySonido && hayPitch) {
+        let notaActual = map(gestorFrec.filtrada, 0.0, 1.0, gestorFrec.minimo, gestorFrec.maximo);
+        let notaUmbralDivision = (gestorFrec.minimo + gestorFrec.maximo) / 2;
+        if (notaActual < notaUmbralDivision - 1.0) zonaActualEtiqueta = "GRAVE (Zona 1)";
+        else if (notaActual > notaUmbralDivision + 1.0) zonaActualEtiqueta = "AGUDA (Zona 2)";
+        else zonaActualEtiqueta = "TRANSICIÓN / MEDIA";
+    }
+    text("Zona Tonal: " + zonaActualEtiqueta, dx + 40, 605);
 
     // Categoría: Agudos (Shhhhh)
     fill(100, 100, 105);
