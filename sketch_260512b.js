@@ -1,4 +1,5 @@
 let paletaActual;
+let paletaDestino;
 let paletaInicial;
 let indicePaletaActual = -1;
 let todosLosColores = [];
@@ -84,8 +85,11 @@ let paletas = [
 // Colores de la obra (semánticos)
 let colFondo = '#f0f0f0';
 
-// Parámetro de interacción para las ventanas
-let variacionVentana = 0;
+// Parámetros de interacción para las ventanas
+let variacionVentana = 0; // Se mantiene por compatibilidad general
+let variacionV1 = 0;      // Deformación de Ventana 1 (Celeste)
+let variacionV2 = 0;      // Deformación de Ventana 2 (Naranja)
+let variacionV3 = 0;      // Deformación de Ventana 3 (Rosa)
 const LIMITE_EXPANSION = 30;
 const LIMITE_CONTRACCION = -40;
 
@@ -110,6 +114,16 @@ let umbralDuracionSonido = 1000;
 // -------------SONIDO GENERAL-----------------
 let mic;
 let audioIniciado = false;
+
+// -------------EASTER EGG AUDIO PC-----------------
+let modoAudioPC = false;
+let streamSistema = null;
+let amplitudeSistema = null;
+let pitchSistema = null;
+let hayPitchSistema = false;
+let notaMidiSistema = 0;
+let sourceSistema = null;
+let hayVozPC = false;
 
 // -------------AMPLITUD-----------------
 let pisoAmp = Infinity;
@@ -146,11 +160,12 @@ let sonidoLargo = false;
 let marcaUltimoPitch = 0;
 let timeoutSinPitch = 300;
 
-// -------DETECCION DE PICOS DE FRECUENCIA-----
+// -------DETECCION DE PICOS DE FRECUENCIA Y ZONAS-----
 let umbralVariacionFrec = 2.0; // Mínima variación en notas MIDI para filtrar el ruido ambiente
 let ultimoExtremoFrec = 0;     // Nota MIDI del último pico o valle
 let direccionFrec = 0;         // Dirección del cambio: 1 = subiendo, -1 = bajando, 0 = indefinido
 let ultimoCambioPaleta = 0;    // Registro de tiempo (millis) del último cambio de paleta
+let zonaFrecuenciaAnterior = 0; // Estado del frame anterior: 0=indefinido/silencio, 1=grave, 2=agudo
 
 // -------ANALISIS DE SISEO (SHHHHH) Y VIBRACION-----
 let fft;
@@ -160,6 +175,12 @@ let energyMid = 0;
 let esShhhh = false;
 let umbralShhhh = 50;          // Umbral de energía de agudos mínimos para el siseo
 let ampVibracion = 0;          // Amplitud actual de la vibración de los barrotes
+
+// -------------INTERFAZ DE CONTROL DE SONIDO-----------------
+let slidersControlSonido = [];
+let botonesControlSonido = [];
+let sliderActivoControlSonido = null;
+let retornoVoz = false;
 
 
 /**
@@ -180,7 +201,8 @@ function setup() {
     todosLosColores = Array.from(setColores);
 
     elegirPaletaAlAzar();
-    paletaInicial = { ...paletaActual }; // Guardar copia de la paleta inicial original
+    paletaActual = { ...paletaDestino };
+    paletaInicial = { ...paletaDestino }; // Guardar copia de la paleta inicial original
 
     // Generar texturas de grano estáticas una sola vez al arrancar
     grainBloque1 = generateGrain(260, 260);
@@ -195,6 +217,10 @@ function setup() {
 
     // Analizador de espectro para detección de siseo
     fft = new p5.FFT();
+
+    // Inicializar sliders y botones de la interfaz de control de sonido
+    inicializarInterfazControlSonido();
+    inicializarBotonesControlSonido();
 }
 
 /**
@@ -208,10 +234,10 @@ function elegirPaletaAlAzar() {
         }
     }
     indicePaletaActual = random(indicesDisponibles);
-    paletaActual = { ...paletas[indicePaletaActual] };
+    paletaDestino = { ...paletas[indicePaletaActual] };
 
     // Validación: verificamos que todos los colores sean únicos para asegurar que no haya adyacentes iguales
-    let colores = Object.values(paletaActual);
+    let colores = Object.values(paletaDestino);
     let coloresUnicos = new Set(colores);
     if (coloresUnicos.size !== colores.length) {
         console.warn("Advertencia: La paleta seleccionada contiene colores duplicados.");
@@ -225,9 +251,23 @@ function elegirPaletaAlAzar() {
  * la pantalla de calibración (monitoreo), la obra artística y el overlay de inicio.
  */
 function draw() {
-    // Si el audio está iniciado, se procesa el stream del micrófono
+    // Si el monitor de calibración está activo, se muestra y se cancela el render de la obra
+    if (monitor) {
+        dibujarInterfazControlSonido();
+        if (audioIniciado) {
+            antesHabiaSonido = haySonido;
+        }
+        return;
+    }
+
+    // Si el audio está iniciado, se procesa el stream del micrófono o de la PC
     if (audioIniciado) {
-        amp = mic.getLevel();
+        if (modoAudioPC && amplitudeSistema) {
+            amp = amplitudeSistema.getLevel();
+            hayPitch = hayPitchSistema;
+        } else {
+            amp = mic.getLevel();
+        }
 
         if (calibrandoAmp) {
             // Captura los valores máximos y mínimos de volumen
@@ -261,6 +301,26 @@ function draw() {
         // Mapea la intensidad del sonido al rango permitido de variación de ventanas
         variacionVentana = map(intensidad, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
 
+        // Dinámicas y sensibilidades diferenciadas para cada ventana
+        // Ventana 1 (Celeste): Sensibilidad lineal estándar y suavizado lento
+        let targetV1 = map(intensidad, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV1 = lerp(variacionV1, targetV1, 0.07);
+
+        // Ventana 2 (Naranja): Reacción más rápida a bajos volúmenes (sensibilidad x1.4) y respuesta veloz
+        let intensidadV2 = constrain(intensidad * 1.4, 0.0, 1.0);
+        let targetV2 = map(intensidadV2, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV2 = lerp(variacionV2, targetV2, 0.3);
+
+        // Ventana 3 (Rosa): Reacción no lineal (sensibilidad baja a volumen moderado) y movimiento inercial muy lento
+        let intensidadV3 = pow(intensidad, 1.5);
+        let targetV3 = map(intensidadV3, 0.0, 1.0, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV3 = lerp(variacionV3, targetV3, 0.03);
+
+        // Garantizar que ninguna ventana supere los límites físicos establecidos
+        variacionV1 = constrain(variacionV1, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV2 = constrain(variacionV2, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+        variacionV3 = constrain(variacionV3, LIMITE_CONTRACCION, LIMITE_EXPANSION);
+
         // Clasificación de sonido mediante umbrales
         haySonido = intensidad > umbralRuido;
         empezoElSonido = haySonido && !antesHabiaSonido;
@@ -288,44 +348,61 @@ function draw() {
             durSilencio = millis() - marcaFinSonido;
         }
 
-        // Algoritmo de detección de picos en la variación de graves y agudos (con histéresis)
+        // Algoritmo de detección de transición de notas (Grave a Aguda con histéresis central)
         if (haySonido && hayPitch) {
             let notaActual = map(gestorFrec.filtrada, 0.0, 1.0, gestorFrec.minimo, gestorFrec.maximo);
+            let notaUmbralDivision = (gestorFrec.minimo + gestorFrec.maximo) / 2;
+            let margenHisteresis = 0.4; // Margen de exclusión reducido para acelerar la detección
+            let zonaActual = 0;
 
-            if (direccionFrec === 0) {
-                ultimoExtremoFrec = notaActual;
-                direccionFrec = 1; // Asumimos dirección de subida al iniciar
-            } else if (direccionFrec === 1) {
-                // Buscando un pico máximo (agudo)
-                if (notaActual > ultimoExtremoFrec) {
-                    ultimoExtremoFrec = notaActual;
-                } else if (notaActual < ultimoExtremoFrec - umbralVariacionFrec) {
-                    // Se superó el umbral hacia abajo -> pico detectado
-                    mezclarPaletaAleatoriamente();
-                    direccionFrec = -1;
-                    ultimoExtremoFrec = notaActual;
-                }
-            } else if (direccionFrec === -1) {
-                // Buscando un valle mínimo (grave)
-                if (notaActual < ultimoExtremoFrec) {
-                    ultimoExtremoFrec = notaActual;
-                } else if (notaActual > ultimoExtremoFrec + umbralVariacionFrec) {
-                    // Se superó el umbral hacia arriba -> valle detectado
-                    mezclarPaletaAleatoriamente();
-                    direccionFrec = 1;
-                    ultimoExtremoFrec = notaActual;
+            if (notaActual < notaUmbralDivision - margenHisteresis) {
+                zonaActual = 1; // Zona Grave
+            } else if (notaActual > notaUmbralDivision + margenHisteresis) {
+                zonaActual = 2; // Zona Aguda
+            } else {
+                // Conserva el estado de zona anterior en la franja media para evitar ruidos de frontera
+                zonaActual = (zonaFrecuenciaAnterior !== 0) ? zonaFrecuenciaAnterior : 0;
+            }
+
+            // Se dispara la transición si pasa de Grave a Agudo o de Agudo a Grave
+            if ((zonaFrecuenciaAnterior === 1 && zonaActual === 2) || (zonaFrecuenciaAnterior === 2 && zonaActual === 1)) {
+                // Cooldown de 300ms para evitar saltos múltiples por fluctuaciones rápidas de ruido
+                if (millis() - ultimoCambioPaleta > 300) {
+                    elegirPaletaAlAzar();
+                    ultimoCambioPaleta = millis();
+                    console.log("Transición acústica detectada (" + (zonaFrecuenciaAnterior === 1 ? "Grave -> Aguda" : "Aguda -> Grave") + "). Cambiando a otra paleta aleatoria del catálogo.");
                 }
             }
+
+            // Actualizamos el registro de estado
+            if (zonaActual !== 0) {
+                zonaFrecuenciaAnterior = zonaActual;
+            }
         } else {
-            // Fuera de sonido o sin tono limpio, reseteamos la dirección para reiniciar
-            direccionFrec = 0;
+            // Fuera de sonido o sin tono limpio, restablecemos la zona de referencia
+            zonaFrecuenciaAnterior = 0;
         }
 
-        // Si el monitor de calibración está activo, se muestra y se cancela el render de la obra
-        if (monitor) {
-            monitoreo();
-            antesHabiaSonido = haySonido;
-            return;
+        // --- INTERPOLACIÓN SUAVE DE COLORES (LERPCOLOR) ---
+        // La velocidad de transición depende de la altura y la diferencia de altura del sonido.
+        // Si hay sonido grave (altura baja), la transición es lenta.
+        // Si hay variaciones rápidas de frecuencia (difAltura grande), la transición es más rápida y viva.
+        let factorLerpBase = 0.015; // Velocidad de cambio base lenta y constante para que parezca vivo
+        let factorAltura = map(altura, 0.0, 1.0, 0.005, 0.04); // Frecuencia baja -> lerp lento, frecuencia alta -> lerp rápido
+        let factorDiferencia = map(abs(difAltura), 0.0, 5.0, 0.0, 0.06, true); // Variación rápida acelera la transición
+
+        let factorLerp = factorLerpBase;
+        if (haySonido) {
+            factorLerp = factorAltura + factorDiferencia;
+        }
+        factorLerp = constrain(factorLerp, 0.002, 0.12); // Acotamos para mantener la suavidad de transición
+
+        let claves = Object.keys(paletaDestino);
+        for (let clave of claves) {
+            let colorActual = color(paletaActual[clave]);
+            let colorDestino = color(paletaDestino[clave]);
+            let colorInterp = lerpColor(colorActual, colorDestino, factorLerp);
+            paletaActual[clave] = colorInterp;
         }
     }
 
@@ -336,6 +413,43 @@ function draw() {
     push();
     translate(width * 0.15, height * 0.05);
     scale(0.85);
+
+    // === CÁLCULO DINÁMICO DE LA SOMBRA CON EL SONIDO ===
+    let desviacionAngulo = 0;
+    let distSombra = 15;
+    if (audioIniciado && haySonido) {
+        desviacionAngulo = map(altura, 0.0, 1.0, -0.32, 0.32);
+        distSombra = map(intensidad, 0.0, 1.0, 15, 25);
+    }
+    let anguloSombra = PI / 4 + desviacionAngulo;
+    let shadowOffsetX = distSombra * cos(anguloSombra);
+    let shadowOffsetY = distSombra * sin(anguloSombra);
+
+    // === DIBUJO DE LA SOMBRA EN CAÍDA (SUTIL) ===
+    push();
+    drawingContext.shadowColor = 'rgba(0, 0, 0, 0.25)'; // Sombra difusa mate un poco más marcada
+    drawingContext.shadowBlur = 20; // Difuminado ajustado para mayor presencia
+    drawingContext.shadowOffsetX = shadowOffsetX;
+    drawingContext.shadowOffsetY = shadowOffsetY;
+
+    fill(colFondo); // Silueta invisible (del mismo color de fondo)
+    noStroke();
+
+    // Dibujamos las mismas formas base para proyectar la sombra del conjunto completo
+    rect(60, 420, 450, 310);  // Base verde (Bloque 6)
+    rect(450, 275, 300, 330); // Bloque rosa a la derecha (Bloque 5)
+    rect(45, 50, 260, 260);   // Bloque amarillo (Bloque 1)
+    rect(305, 0, 355, 320);   // Bloque rojo (Bloque 2)
+    rect(115, 310, 345, 415); // Bloque morado (Bloque 3)
+    rect(460, 310, 255, 250); // Bloque azul (Bloque 4)
+    rect(0, 725, 575, 75);    // Barra inferior (Bloque 7)
+    pop();
+
+    // === RESTABLECER PROPIEDADES DE SOMBRA PARA LA OBRA REAL ===
+    drawingContext.shadowColor = 'transparent';
+    drawingContext.shadowBlur = 0;
+    drawingContext.shadowOffsetX = 0;
+    drawingContext.shadowOffsetY = 0;
 
     // 1. Rectángulos de fondo (Verde y Rosa)
     fill(paletaActual.colBloque6);
@@ -350,10 +464,10 @@ function draw() {
     image(grainBloque1, 45, 50);
 
     // Ventana Celeste (Parametrizada)
-    let v1X = 100 - variacionVentana;
-    let v1Y = 95 - variacionVentana;
-    let v1W = 150 + 2 * variacionVentana;
-    let v1H = 165 + 2 * variacionVentana;
+    let v1X = 100 - variacionV1;
+    let v1Y = 95 - variacionV1;
+    let v1W = 150 + 2 * variacionV1;
+    let v1H = 165 + 2 * variacionV1;
 
     fill(paletaActual.colMarcoV1);
     rect(v1X, v1Y, v1W, v1H);
@@ -382,10 +496,10 @@ function draw() {
     image(grainBloque3, 115, 310);
 
     // Ventana Naranja (Parametrizada)
-    let v2X = 170 - variacionVentana;
-    let v2Y = 365 - variacionVentana;
-    let v2W = 230 + 2 * variacionVentana;
-    let v2H = 310 + 2 * variacionVentana;
+    let v2X = 170 - variacionV2;
+    let v2Y = 365 - variacionV2;
+    let v2W = 230 + 2 * variacionV2;
+    let v2H = 310 + 2 * variacionV2;
 
     fill(paletaActual.colMarcoV2);
     rect(v2X, v2Y, v2W, v2H);
@@ -411,10 +525,10 @@ function draw() {
     image(grainBloque4, 460, 310);
 
     // Ventana Rosa Fuerte (Parametrizada)
-    let v3X = 510 - variacionVentana;
-    let v3Y = 360 - variacionVentana;
-    let v3W = 150 + 2 * variacionVentana;
-    let v3H = 150 + 2 * variacionVentana;
+    let v3X = 510 - variacionV3;
+    let v3Y = 360 - variacionV3;
+    let v3W = 150 + 2 * variacionV3;
+    let v3H = 150 + 2 * variacionV3;
 
     fill(paletaActual.colMarcoV3);
     rect(v3X, v3Y, v3W, v3H);
@@ -464,17 +578,17 @@ function dibujarOverlayInicio() {
 
     // Sombra sutil proyectada hacia el sentido de la luz de la obra (superior-izquierda -> inferior-derecha)
     fill(0, 25);
-    rect(width / 2 + 5, height / 2 + 5, 450, 220, 8);
+    rect(width / 2 + 5, height / 2 + 5, 680, 220, 8);
 
     // Contenedor principal con color crema mate
     fill(245, 245, 243);
-    rect(width / 2, height / 2, 450, 220, 8);
+    rect(width / 2, height / 2, 680, 220, 8);
 
     // Recuadro interior fino con estética de diseño editorial
     stroke(30, 25);
     strokeWeight(1);
     noFill();
-    rect(width / 2, height / 2, 430, 200, 6);
+    rect(width / 2, height / 2, 660, 200, 6);
 
     // Configuración de textos
     noStroke();
@@ -493,11 +607,11 @@ function dibujarOverlayInicio() {
     textStyle(NORMAL);
     text("Haga clic en la pantalla para activar el sonido", width / 2, height / 2 - 10);
 
-    // Controles y leyendas
+    // Control de sonido, reset e interacciones
     fill(110, 110, 110);
     textSize(11);
-    text("Controles: [M] Monitoreo  |  [C] Calibrar  |  [A] Aplicar Rango", width / 2, height / 2 + 30);
-    text("Teclas: [1] [2] Umbral Frec.  |  [Espacio] Reset  |  Sonido: Graves/Agudos cambia paleta", width / 2, height / 2 + 55);
+    text("Control de sonido: [M] Monitoreo  |  Reset: [Espacio] Reiniciar obra", width / 2, height / 2 + 30);
+    text("Interacciones: Graves/Agudos cambian paleta  |  Volumen deforma ventanas  |  Siseo (Shhhhh) vibra barrotes", width / 2, height / 2 + 55);
 
     pop();
 }
@@ -507,10 +621,72 @@ function dibujarOverlayInicio() {
  * interacción y preserva la interacción original en clics subsecuentes.
  */
 function mousePressed() {
+    // Si la interfaz de control de sonido está activa
+    if (monitor) {
+        // 1. Detectar si el clic es sobre algún botón del panel
+        for (let boton of botonesControlSonido) {
+            if (mouseX >= boton.x && mouseX <= boton.x + boton.w &&
+                mouseY >= boton.y && mouseY <= boton.y + boton.h) {
+
+                // Si es el botón de volver a la obra, no iniciamos el audio
+                if (boton.etiqueta === "← VOLVER A LA OBRA") {
+                    boton.accion();
+                    return;
+                }
+
+                // Si es otro botón de acción, sí iniciamos el audio si no estaba activo
+                if (!audioIniciado) {
+                    iniciarAudio();
+                }
+                boton.accion();
+                return;
+            }
+        }
+
+        // 2. Detectar si el clic es sobre algún slider del panel
+        for (let slider of slidersControlSonido) {
+            if (mouseX >= slider.x && mouseX <= slider.x + slider.w &&
+                mouseY >= slider.y - 5 && mouseY <= slider.y + slider.h + 5) {
+
+                // Si el audio no está iniciado, lo iniciamos ya que va a cambiar un parámetro acústico
+                if (!audioIniciado) {
+                    iniciarAudio();
+                }
+                sliderActivoControlSonido = slider;
+                actualizarValorSliderControlSonido();
+                return;
+            }
+        }
+
+        // Si el clic ocurre en zonas vacías del panel, lo ignoramos para no forzar audio
+        return;
+    }
+
+    // Si estamos en la obra normal (overlay crema inicial)
     if (!audioIniciado) {
         iniciarAudio();
-    } else {
-        detectarInputMouse();
+        return;
+    }
+
+    // Clic normal en la obra cuando ya está iniciado el audio
+    detectarInputMouse();
+}
+
+/**
+ * Evento nativo de arrastre del ratón de p5.js.
+ */
+function mouseDragged() {
+    if (monitor) {
+        mouseDraggedControlSonido();
+    }
+}
+
+/**
+ * Evento nativo de liberación del ratón de p5.js.
+ */
+function mouseReleased() {
+    if (monitor) {
+        mouseReleasedControlSonido();
     }
 }
 
@@ -565,6 +741,11 @@ function keyPressed() {
         }
     } else if (key === 'm' || key === 'M') {
         monitor = !monitor;
+        if (!monitor && retornoVoz) {
+            retornoVoz = false;
+            mic.disconnect();
+            console.log("Retorno de voz desactivado automáticamente por tecla M al volver a la obra.");
+        }
     }
 
     // Ajuste de umbral de variación de frecuencia
@@ -580,10 +761,17 @@ function keyPressed() {
     if (key === '3' || key === '4') {
         // La mezcla manual por teclas se deshabilita para priorizar la interacción por sonido
         // mezclarPaletaAleatoriamente();
+    } else if (key === 'v' || key === 'V') {
+        toggleAudioPC();
     } else if (key === ' ') {
         // Volver al tamaño original y restaurar la paleta inicial original
         variacionVentana = 0;
+        variacionV1 = 0;
+        variacionV2 = 0;
+        variacionV3 = 0;
+        zonaFrecuenciaAnterior = 0;
         paletaActual = { ...paletaInicial };
+        paletaDestino = { ...paletaInicial };
         redraw();
     }
 }
@@ -593,15 +781,15 @@ function keyPressed() {
  * y resuelve los posibles conflictos de elementos adyacentes para evitar repeticiones.
  */
 function mezclarPaletaAleatoriamente() {
-    // Evita cambios de paleta demasiado seguidos (cooldown de 2 segundos)
+    // Evita cambios de paleta demasiado seguidos (cooldown de 500ms)
     if (millis() - ultimoCambioPaleta < 500) {
         return;
     }
     ultimoCambioPaleta = millis();
 
-    let claves = Object.keys(paletaActual);
+    let claves = Object.keys(paletaDestino);
     for (let clave of claves) {
-        paletaActual[clave] = random(todosLosColores);
+        paletaDestino[clave] = random(todosLosColores);
     }
     resolverConflictosAdyacentes();
     redraw();
@@ -646,15 +834,15 @@ function resolverConflictosAdyacentes() {
             let elem2 = par[1];
 
             // Si los colores coinciden exactamente
-            if (paletaActual[elem1] === paletaActual[elem2]) {
+            if (paletaDestino[elem1] === paletaDestino[elem2]) {
                 huboConflicto = true;
                 // Reasignamos el color del segundo elemento por otro color aleatorio
                 let nuevoColor;
                 do {
                     nuevoColor = random(todosLosColores);
-                } while (nuevoColor === paletaActual[elem1]);
+                } while (nuevoColor === paletaDestino[elem1]);
 
-                paletaActual[elem2] = nuevoColor;
+                paletaDestino[elem2] = nuevoColor;
             }
         }
     }
@@ -694,92 +882,418 @@ function generateGrain(w, h) {
 }
 
 /**
- * Dibuja en pantalla negra todos los datos de monitoreo de sonido y las curvas de los gestores.
+ * Inicializa y configura los sliders interactivos del panel de control de sonido.
+ * Define los límites, etiquetas y funciones callback para leer/escribir cada variable.
  */
-function monitoreo() {
+function inicializarInterfazControlSonido() {
+    slidersControlSonido = [
+        {
+            etiqueta: "Amplitud Mínima (Sensibilidad)",
+            minVal: 0.0001,
+            maxVal: 0.02,
+            get: () => AMP_MIN,
+            set: (v) => { AMP_MIN = v; gestorAmp.minimo = v; },
+            formato: (v) => v.toFixed(5),
+            esEntero: false
+        },
+        {
+            etiqueta: "Amplitud Máxima (Límite Alto)",
+            minVal: 0.01,
+            maxVal: 0.5,
+            get: () => AMP_MAX,
+            set: (v) => { AMP_MAX = v; gestorAmp.maximo = v; },
+            formato: (v) => v.toFixed(4),
+            esEntero: false
+        },
+        {
+            etiqueta: "Umbral de Ruido (Puerta de Ruido)",
+            minVal: 0.01,
+            maxVal: 0.5,
+            get: () => umbralRuido,
+            set: (v) => { umbralRuido = v; },
+            formato: (v) => v.toFixed(3),
+            esEntero: false
+        },
+        {
+            etiqueta: "Nota MIDI Mínima",
+            minVal: 24,
+            maxVal: 72,
+            get: () => NOTA_MIN,
+            set: (v) => { NOTA_MIN = Math.round(v); gestorFrec.minimo = Math.round(v); },
+            formato: (v) => Math.round(v).toString() + " (" + Math.round(midiToFreq(v)) + " Hz)",
+            esEntero: true
+        },
+        {
+            etiqueta: "Nota MIDI Máxima",
+            minVal: 48,
+            maxVal: 96,
+            get: () => NOTA_MAX,
+            set: (v) => { NOTA_MAX = Math.round(v); gestorFrec.maximo = Math.round(v); },
+            formato: (v) => Math.round(v).toString() + " (" + Math.round(midiToFreq(v)) + " Hz)",
+            esEntero: true
+        },
+        {
+            etiqueta: "Umbral Siseo (Shhhhh)",
+            minVal: 10,
+            maxVal: 200,
+            get: () => umbralShhhh,
+            set: (v) => { umbralShhhh = v; },
+            formato: (v) => Math.round(v).toString(),
+            esEntero: true
+        },
+        {
+            etiqueta: "Variación Tono (Picos MIDI)",
+            minVal: 0.5,
+            maxVal: 5.0,
+            get: () => umbralVariacionFrec,
+            set: (v) => { umbralVariacionFrec = v; },
+            formato: (v) => v.toFixed(2),
+            esEntero: false
+        },
+        {
+            etiqueta: "Suavizado Señal (Paso Bajo)",
+            minVal: 0.1,
+            maxVal: 0.98,
+            get: () => gestorAmp.f,
+            set: (v) => { gestorAmp.f = v; gestorFrec.f = v; },
+            formato: (v) => v.toFixed(2),
+            esEntero: false
+        }
+    ];
+
+    // Barajar claves de color de la paleta para asignar colores estables pero aleatorios a cada barra
+    let clavesColores = ["colBloque1", "colBloque2", "colBloque3", "colBloque4", "colBloque5", "colBloque6", "colBloque7"];
+    let clavesBarajadas = [];
+    let copiaClaves = [...clavesColores];
+    while (copiaClaves.length > 0) {
+        let idx = Math.floor(Math.random() * copiaClaves.length);
+        clavesBarajadas.push(copiaClaves.splice(idx, 1)[0]);
+    }
+
+    // Configurar posiciones geométricas (X, Y, Ancho, Alto) y asignar claveColor a cada slider de la interfaz
+    let xBase = 50;
+    let yBase = 140;
+    let wSlider = 300;
+    let hSlider = 10;
+    let espaciado = 60;
+
+    for (let i = 0; i < slidersControlSonido.length; i++) {
+        slidersControlSonido[i].x = xBase;
+        slidersControlSonido[i].y = yBase + i * espaciado;
+        slidersControlSonido[i].w = wSlider;
+        slidersControlSonido[i].h = hSlider;
+        slidersControlSonido[i].claveColor = clavesBarajadas[i % clavesBarajadas.length];
+    }
+}
+
+/**
+ * Inicializa y configura los botones interactivos del panel de control de sonido.
+ * Define la posición y la acción a ejecutar al hacer clic sobre ellos.
+ */
+function inicializarBotonesControlSonido() {
+    botonesControlSonido = [
+        {
+            etiqueta: "CALIBRAR VOLUMEN",
+            accion: () => {
+                calibrandoAmp = !calibrandoAmp;
+                if (calibrandoAmp) {
+                    pisoAmp = Infinity;
+                    techoAmp = -Infinity;
+                }
+                console.log("Calibración Amp =", calibrandoAmp ? "ACTIVA" : "INACTIVA");
+            },
+            getActivo: () => calibrandoAmp,
+            x: 50,
+            y: 630,
+            w: 160,
+            h: 35
+        },
+        {
+            etiqueta: "APLICAR RANGO",
+            accion: () => {
+                if (isFinite(pisoAmp) && isFinite(techoAmp) && techoAmp > pisoAmp) {
+                    AMP_MIN = pisoAmp;
+                    AMP_MAX = techoAmp;
+                    gestorAmp.minimo = AMP_MIN;
+                    gestorAmp.maximo = AMP_MAX;
+                    console.log("Calibración aplicada: min=" + AMP_MIN + ", max=" + AMP_MAX);
+                }
+            },
+            getActivo: () => false,
+            x: 230,
+            y: 630,
+            w: 160,
+            h: 35
+        },
+        {
+            etiqueta: "RESTAURAR VALORES POR DEFECTO",
+            accion: () => {
+                AMP_MIN = 0.001;
+                AMP_MAX = 0.13;
+                NOTA_MIN = 48;
+                NOTA_MAX = 60;
+                umbralRuido = 0.1;
+                umbralShhhh = 50;
+                umbralVariacionFrec = 2.0;
+                gestorAmp.minimo = AMP_MIN;
+                gestorAmp.maximo = AMP_MAX;
+                gestorFrec.minimo = NOTA_MIN;
+                gestorFrec.maximo = NOTA_MAX;
+                gestorAmp.f = 0.80;
+                gestorFrec.f = 0.80;
+                pisoAmp = Infinity;
+                techoAmp = -Infinity;
+                console.log("Valores restaurados por defecto.");
+            },
+            getActivo: () => false,
+            x: 50,
+            y: 685,
+            w: 340,
+            h: 35
+        },
+        {
+            etiqueta: "← VOLVER A LA OBRA",
+            accion: () => {
+                monitor = false;
+                variacionVentana = 0;
+                variacionV1 = 0;
+                variacionV2 = 0;
+                variacionV3 = 0;
+                zonaFrecuenciaAnterior = 0;
+                paletaActual = { ...paletaInicial };
+                // Apagar el retorno de voz automáticamente al volver a la obra
+                if (retornoVoz) {
+                    retornoVoz = false;
+                    mic.disconnect();
+                    console.log("Retorno de voz desactivado automáticamente al volver a la obra.");
+                }
+                redraw();
+            },
+            getActivo: () => false,
+            x: 600,
+            y: 35,
+            w: 150,
+            h: 30
+        },
+        {
+            etiqueta: "PRUEBA DE VOZ (RETORNO)",
+            accion: () => {
+                if (!audioIniciado) {
+                    iniciarAudio();
+                }
+                retornoVoz = !retornoVoz;
+                if (retornoVoz) {
+                    mic.connect();
+                    console.log("Retorno de voz (Prueba de voz) ACTIVO.");
+                } else {
+                    mic.disconnect();
+                    console.log("Retorno de voz (Prueba de voz) INACTIVO.");
+                }
+            },
+            getActivo: () => retornoVoz,
+            x: 50,
+            y: 740,
+            w: 340,
+            h: 35
+        }
+    ];
+}
+
+/**
+ * Renderiza la interfaz gráfica interactiva de control de sonido.
+ * Dibuja sliders, botones, telemetría y los osciloscopios de señal.
+ */
+function dibujarInterfazControlSonido() {
     push();
-    background(0);
-    fill(255);
-    textSize(18);
-    textAlign(LEFT, BASELINE);
+    // Fondo claro crema premium de estudio
+    background(245, 245, 243);
+
+    // --- ENCABEZADO ---
+    fill(20, 20, 22);
+    noStroke();
     textFont("'Helvetica Neue', Helvetica, Arial, sans-serif");
+    textSize(20);
+    textStyle(BOLD);
+    text("PANEL DE CONTROL DE SONIDO", 50, 50);
 
-    text("MONITOREO DE SONIDO (CGASG)", 50, 40);
-    textSize(14);
+    textSize(11);
+    textStyle(NORMAL);
+    fill(100, 100, 105);
+    text("AJUSTES DE SENSIBILIDAD E INTERACCIÓN GENERATIVA  |  [M] VOLVER A LA OBRA", 50, 75);
 
-    text(
-        "AMP: " +
-        amp.toFixed(3) +
-        " | pisoAmp: " +
-        pisoAmp.toFixed(3) +
-        " | techoAmp: " +
-        techoAmp.toFixed(3),
-        50,
-        80
-    );
+    // Separador lineal minimalista
+    stroke(205, 205, 210);
+    strokeWeight(1);
+    line(50, 90, width - 50, 90);
 
-    text("FREC: " + frec.toFixed(2) + " Hz", 50, 120);
-    text("NOTA MIDI: " + notaMidi.toFixed(2), 50, 160);
-    text("INTENSIDAD (Amp filtrada): " + intensidad.toFixed(2), 50, 200);
-    text("ALTURA (Frec filtrada): " + altura.toFixed(2), 50, 240);
-    text("DIF ALTURA (Derivada frec): " + difAltura.toFixed(2), 50, 280);
-    text("DUR SONIDO: " + (durSonido / 1000).toFixed(2) + " s", 50, 320);
-    text("DUR SILENCIO: " + (durSilencio / 1000).toFixed(2) + " s", 50, 360);
-    text(
-        "SONIDO LARGO: " + (sonidoLargo ? "SI" : "NO") +
-        " | UM. " + (umbralDuracionSonido / 1000).toFixed(2) + " s",
-        50,
-        400
-    );
-    text("HAY SONIDO: " + (haySonido ? "SI" : "NO"), 50, 440);
-    text(
-        "HAY PITCH: " + (hayPitch ? "SI" : "NO") +
-        " | UMBRAL RUIDO: " +
-        umbralRuido.toFixed(2),
-        50,
-        480
-    );
+    // --- PANEL IZQUIERDO: SLIDERS Y BOTONES ---
+    for (let slider of slidersControlSonido) {
+        let valActual = slider.get();
+        // Dibujar etiqueta
+        noStroke();
+        fill(90, 90, 95);
+        textSize(11);
+        textAlign(LEFT, BASELINE);
+        text(slider.etiqueta.toUpperCase(), slider.x, slider.y - 8);
 
-    // NUEVOS DATOS DEL DETECTOR DE PICOS
-    let notaActual = map(gestorFrec.filtrada, 0.0, 1.0, gestorFrec.minimo, gestorFrec.maximo);
-    text(
-        "DETECTOR DE PICOS FRECUENCIA:\n" +
-        "  - Nota MIDI Actual: " + notaActual.toFixed(2) + "\n" +
-        "  - Último Extremo: " + ultimoExtremoFrec.toFixed(2) + "\n" +
-        "  - Dirección: " + (direccionFrec === 1 ? "SUBIENDO (Agudo)" : (direccionFrec === -1 ? "BAJANDO (Grave)" : "REPOSO")) + "\n" +
-        "  - Umbral Variación Frec (Teclas [1]/[2]): " + umbralVariacionFrec.toFixed(2) + " MIDI",
-        50,
-        520
-    );
+        // Dibujar valor actual a la derecha
+        textAlign(RIGHT, BASELINE);
+        fill(30, 30, 32);
+        text(slider.formato(valActual), slider.x + slider.w, slider.y - 8);
 
-    text(
-        "CALIBRACION AMP: " + (calibrandoAmp ? "ACTIVA" : "INACTIVA") +
-        "\nControles: [C] Calibrar | [A] Aplicar Rango | [M] Volver a la Obra",
-        50,
-        630
-    );
+        // Pista del slider (fondo)
+        strokeWeight(slider.h);
+        stroke(225, 225, 230);
+        strokeCap(ROUND);
+        line(slider.x, slider.y + slider.h / 2, slider.x + slider.w, slider.y + slider.h / 2);
 
-    gestorAmp.dibujar(width - 450, 80);
-    gestorFrec.dibujar(width - 450, 230);
+        // Barra de progreso llena (color dinámico tomado de la paleta actual de la obra)
+        let pct = map(valActual, slider.minVal, slider.maxVal, 0.0, 1.0, true);
+        let colSlider = paletaActual[slider.claveColor] || '#e6b111';
+        stroke(colSlider);
+        line(slider.x, slider.y + slider.h / 2, slider.x + slider.w * pct, slider.y + slider.h / 2);
 
-    // Telemetría para el análisis y detección de siseo (shhhhh)
-    push();
-    fill(255);
-    textSize(13);
+        // Perilla (knob) minimalista
+        stroke(170, 170, 175);
+        strokeWeight(1);
+        fill(255);
+        ellipse(slider.x + slider.w * pct, slider.y + slider.h / 2, 14, 14);
+    }
+
+    // Dibujar botones
+    for (let boton of botonesControlSonido) {
+        let esActivo = boton.getActivo();
+        let esHover = (mouseX >= boton.x && mouseX <= boton.x + boton.w && mouseY >= boton.y && mouseY <= boton.y + boton.h);
+
+        // Fondo del botón
+        if (esActivo) {
+            // Si está activo (ej: calibrando), usamos un color llamativo de la paleta
+            fill(paletaActual.colBloque5 || '#d3299d');
+        } else if (esHover) {
+            fill(215, 215, 220); // Gris hover claro
+        } else {
+            fill(235, 235, 238); // Gris fondo claro
+        }
+
+        // Borde fino minimalista
+        stroke(195, 195, 200);
+        strokeWeight(1);
+        rectMode(CORNER);
+        rect(boton.x, boton.y, boton.w, boton.h, 4);
+
+        // Texto del botón
+        noStroke();
+        if (esActivo) {
+            fill(255); // Texto blanco sobre fondo activo de paleta
+        } else {
+            fill(50, 50, 55); // Gris oscuro
+        }
+        textSize(10);
+        textStyle(BOLD);
+        textAlign(CENTER, CENTER);
+        text(boton.etiqueta, boton.x + boton.w / 2, boton.y + boton.h / 2);
+    }
+
+    // --- PANEL DERECHO: TELEMETRÍA Y OSCILOSCOPIOS ---
+    let dx = 480;
+
+    // Dibujar osciloscopio de amplitud
+    fill(90, 90, 95);
+    textSize(11);
+    textStyle(BOLD);
     textAlign(LEFT, TOP);
-    text(
-        "DETECTOR DE SISEO (SHHHHH):\n" +
-        "  - Treble (4-15kHz): " + energyTreble.toFixed(1) + " (Mínimo: " + umbralShhhh + ")\n" +
-        "  - Bass (20-500Hz) : " + energyBass.toFixed(1) + "\n" +
-        "  - Mid (500-2kHz)  : " + energyMid.toFixed(1) + "\n" +
-        "  - ¿Es Shhhhh?     : " + (esShhhh ? "SÍ" : "NO") + "\n" +
-        "  - Amp Vibración   : " + ampVibracion.toFixed(2),
-        width - 450,
-        360
-    );
-    pop();
+    text("HISTORIAL DE AMPLITUD (VOLUMEN)", dx, 110);
+    gestorAmp.dibujar(dx, 130);
+
+    // Dibujar osciloscopio de frecuencia
+    text("HISTORIAL DE FRECUENCIA (TONO MIDI)", dx, 255);
+    gestorFrec.dibujar(dx, 275);
+
+    // Caja de telemetría minimalista (fondo gris muy claro premium)
+    fill(235, 235, 238);
+    stroke(215, 215, 220);
+    rect(dx, 400, 270, 320, 6);
+
+    noStroke();
+    fill(20, 20, 22);
+    textSize(13);
+    textStyle(BOLD);
+    text("TELEMETRÍA EN TIEMPO REAL", dx + 20, 420);
+
+    textSize(12);
+    textStyle(NORMAL);
+    fill(100, 100, 105);
+
+    // Categoría: Amplitud
+    text("VOLUMEN / INTENSIDAD:", dx + 20, 455);
+    fill(40, 40, 45);
+    text("Nivel Crudo: " + amp.toFixed(4), dx + 40, 475);
+    text("Filtrado (Intensidad): " + intensidad.toFixed(3), dx + 40, 495);
+    text("Rango Calibrado: [" + pisoAmp.toFixed(4) + " - " + techoAmp.toFixed(4) + "]", dx + 40, 515);
+
+    // Categoría: Frecuencia
+    fill(100, 100, 105);
+    text("FRECUENCIA / ALTURA:", dx + 20, 545);
+    fill(40, 40, 45);
+    text("Frecuencia: " + frec.toFixed(1) + " Hz", dx + 40, 565);
+    text("Nota MIDI: " + notaMidi.toFixed(1), dx + 40, 585);
+    let zonaActualEtiqueta = "SILENCIO";
+    if (haySonido && hayPitch) {
+        let notaActual = map(gestorFrec.filtrada, 0.0, 1.0, gestorFrec.minimo, gestorFrec.maximo);
+        let notaUmbralDivision = (gestorFrec.minimo + gestorFrec.maximo) / 2;
+        if (notaActual < notaUmbralDivision - 1.0) zonaActualEtiqueta = "GRAVE (Zona 1)";
+        else if (notaActual > notaUmbralDivision + 1.0) zonaActualEtiqueta = "AGUDA (Zona 2)";
+        else zonaActualEtiqueta = "TRANSICIÓN / MEDIA";
+    }
+    text("Zona Tonal: " + zonaActualEtiqueta, dx + 40, 605);
+
+    // Categoría: Agudos (Shhhhh)
+    fill(100, 100, 105);
+    text("DETECTOR DE SISEO (SHHHHH):", dx + 20, 635);
+    fill(40, 40, 45);
+    text("Energía Agudos: " + energyTreble.toFixed(1), dx + 40, 655);
+    text("¿Es Shhhhh?: " + (esShhhh ? "SÍ (VIBRANDO)" : "NO"), dx + 40, 675);
+    text("Estado Acústico: " + (haySonido ? "CON SONIDO" : "SILENCIO"), dx + 40, 695);
 
     pop();
+}
+
+
+
+/**
+ * Maneja el arrastre del mouse. Si hay un slider de control de sonido activo,
+ * calcula y actualiza su valor proporcionalmente al desplazamiento X.
+ */
+function mouseDraggedControlSonido() {
+    if (sliderActivoControlSonido) {
+        actualizarValorSliderControlSonido();
+        return true; // Arrastre consumido
+    }
+    return false;
+}
+
+/**
+ * Libera el slider de control de sonido que se estaba arrastrando.
+ */
+function mouseReleasedControlSonido() {
+    sliderActivoControlSonido = null;
+}
+
+/**
+ * Recalcula el valor del slider activo en base a la coordenada X del ratón.
+ */
+function actualizarValorSliderControlSonido() {
+    if (!sliderActivoControlSonido) return;
+
+    let pct = (mouseX - sliderActivoControlSonido.x) / sliderActivoControlSonido.w;
+    pct = constrain(pct, 0.0, 1.0);
+
+    let nuevoVal = map(pct, 0.0, 1.0, sliderActivoControlSonido.minVal, sliderActivoControlSonido.maxVal);
+    if (sliderActivoControlSonido.esEntero) {
+        nuevoVal = Math.round(nuevoVal);
+    }
+
+    sliderActivoControlSonido.set(nuevoVal);
 }
 
 /**
@@ -854,5 +1368,144 @@ function getPitch() {
         }
 
         getPitch();
+    });
+}
+
+/**
+ * Alterna el modo de Audio de PC (Easter Egg).
+ * Utiliza getDisplayMedia para capturar el sonido del sistema en tiempo real.
+ */
+async function toggleAudioPC() {
+    if (!audioIniciado) {
+        await iniciarAudio();
+    }
+
+    if (modoAudioPC) {
+        // Desactivar modo Audio PC
+        modoAudioPC = false;
+
+        // Detener streams de sistema si existen
+        if (streamSistema) {
+            streamSistema.getTracks().forEach(track => track.stop());
+            streamSistema = null;
+        }
+
+        amplitudeSistema = null;
+        pitchSistema = null;
+        sourceSistema = null;
+        hayVozPC = false;
+
+        // Volver a conectar la FFT y activar el micrófono
+        fft.setInput(mic);
+        mic.start(
+            () => {
+                console.log("Micrófono reactivado tras salir de Modo Audio PC.");
+            },
+            (err) => {
+                console.error("Error al reactivar micrófono:", err);
+            }
+        );
+
+        console.log("Modo Audio PC DESACTIVADO. Retornando a micrófono normal.");
+    } else {
+        // Activar modo Audio PC
+        try {
+            let stream = await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: true
+            });
+
+            // Detener la pista de video inmediatamente para ahorrar recursos
+            stream.getVideoTracks().forEach(track => track.stop());
+
+            let audioTracks = stream.getAudioTracks();
+            if (audioTracks.length === 0) {
+                console.warn("No se seleccionó audio del sistema. Cancelando.");
+                stream.getTracks().forEach(track => track.stop());
+                return;
+            }
+
+            // Pausar micrófono normal para que no capte ruido de fondo
+            mic.stop();
+
+            streamSistema = stream;
+
+            // Detectar si el usuario pulsa "Dejar de compartir" en el banner nativo del navegador
+            audioTracks[0].onended = () => {
+                if (modoAudioPC) {
+                    toggleAudioPC();
+                }
+            };
+
+            let systemAudioStream = new MediaStream([audioTracks[0]]);
+
+            let context = getAudioContext();
+            sourceSistema = context.createMediaStreamSource(systemAudioStream);
+
+            amplitudeSistema = new p5.Amplitude();
+            amplitudeSistema.setInput(sourceSistema);
+
+            fft.setInput(sourceSistema);
+
+            pitchSistema = ml5.pitchDetection(
+                model_url,
+                context,
+                systemAudioStream,
+                () => {
+                    console.log("Modelo de pitch cargado para audio de la PC.");
+                    getPitchPC();
+                }
+            );
+
+            modoAudioPC = true;
+            console.log("Modo Audio PC ACTIVO.");
+        } catch (err) {
+            console.error("Error al capturar audio de la PC:", err);
+            // Si el usuario cancela, volvemos a encender el micrófono
+            mic.start();
+        }
+    }
+}
+
+/**
+ * Realiza la lectura recursiva de pitch-detection para el audio del sistema (PC).
+ * Prioriza la voz humana (Crepe) y, si no se detecta voz, recurre al centroide instrumental (FFT).
+ */
+function getPitchPC() {
+    if (!modoAudioPC || !pitchSistema) return;
+
+    pitchSistema.getPitch(function (err, frequency) {
+        if (err) {
+            console.error("Error en getPitchPC:", err);
+            if (modoAudioPC) {
+                setTimeout(getPitchPC, 120);
+            }
+            return;
+        }
+
+        if (frequency) {
+            // Prioridad 1: Detección de voz humana (tono fundamental claro detectado por Crepe)
+            notaMidiSistema = freqToMidi(frequency);
+            hayPitchSistema = true;
+            hayVozPC = true;
+            marcaUltimoPitch = millis();
+            gestorFrec.actualizar(notaMidiSistema);
+        } else {
+            // Prioridad 2: No hay voz humana limpia. Usamos el centroide de la FFT para capturar los instrumentos
+            hayVozPC = false;
+            let frecInstrumental = fft.getCentroid();
+            if (frecInstrumental > 0) {
+                notaMidiSistema = freqToMidi(frecInstrumental);
+                hayPitchSistema = true;
+                marcaUltimoPitch = millis();
+                gestorFrec.actualizar(notaMidiSistema);
+            } else {
+                hayPitchSistema = millis() - marcaUltimoPitch <= timeoutSinPitch;
+            }
+        }
+
+        if (modoAudioPC) {
+            getPitchPC();
+        }
     });
 }
